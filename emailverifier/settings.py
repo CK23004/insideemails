@@ -14,6 +14,8 @@ from pathlib import Path
 import os
 from mongoengine import connect
 from urllib.parse import quote_plus
+from kombu import Exchange, Queue
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -46,7 +48,14 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # Retry broker connection on s
 # CELERY SETTINGS
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
+# Define Celery Queues
+CELERY_TASK_QUEUES = (
+    Queue('default', Exchange('default'), routing_key='default'),
+    Queue('high_priority', Exchange('high_priority'), routing_key='high_priority'),
+)
 
+# Default queue for tasks without a queue specified
+CELERY_TASK_DEFAULT_QUEUE = 'default'
 # Store Celery task results in Redis (optional)
 
 USE_X_FORWARDED_HOST = True

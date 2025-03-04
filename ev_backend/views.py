@@ -437,10 +437,11 @@ class DailySingleEmailVerifyAPIView(APIView):
             # Ensure the key expires at midnight
             redis_client.expireat(redis_key, datetime.datetime.now().replace(hour=23, minute=59, second=59))   
             # Trigger Celery task
-            verify_emails_in_parallel.delay(
-                sender_email, proxy_host, proxy_port, proxy_user, 
-                proxy_password, [email_id], service_type='single_verify_daily', client_ip = client_ip,
-                output_file_name=''
+            verify_emails_in_parallel.apply_async(
+                args=[sender_email, proxy_host, proxy_port, proxy_user, 
+                    proxy_password, [email_id]],
+                kwargs={'service_type': 'single_verify_daily', 'client_ip': client_ip, 'output_file_name': ''},
+                queue='high_priority'  # Specify high-priority queue
             )
             print('triggered')
             return Response({"message": "Verification task triggered successfully"}, status=200)
@@ -504,11 +505,12 @@ class SingleEmailVerifyAPIView(APIView):
             # Debit user's wallet for email verification
             wallet_action(wp_user_id, action="debit", credit_count=1, file_name="Single Email Verify")
             # Trigger Celery task
-            verify_emails_in_parallel.delay(
-                sender_email, proxy_host, proxy_port, proxy_user, 
-                proxy_password, [email_id], service_type='single_verify', 
-                wpuser_id=wp_user_id, post_id=post_id, 
-                output_file_name=''
+            verify_emails_in_parallel.apply_async(
+                args=[sender_email, proxy_host, proxy_port, proxy_user, 
+                    proxy_password, [email_id], 'single_verify'],
+                kwargs={'wpuser_id': wp_user_id, 'post_id': post_id, 
+                        'output_file_name': ''},
+                queue='high_priority'  # Assign to high-priority queue
             )
             print('triggered')
             return Response({"message": "Verification task triggered successfully"}, status=200)
@@ -645,12 +647,14 @@ class EmailFinderAPIView(APIView):
                     )
                     return Response({"message": "Insufficient Credits (You Need Minimum 10 credits to Find Emails)"}, status=200)
             # Call Celery task
-            verify_emails_in_parallel.delay(
-                sender_email, proxy_host, proxy_port, proxy_user, 
-                proxy_password, email_list=email_list, service_type='email_finder', 
-                wpuser_id=wp_user_id, post_id=post_id, output_file_name=''
-            )
-            
+            verify_emails_in_parallel.apply_async(
+                args=[sender_email, proxy_host, proxy_port, proxy_user, 
+                    proxy_password],
+                kwargs={'email_list': email_list, 'service_type': 'email_finder',
+                        'wpuser_id': wp_user_id, 'post_id': post_id, 
+                        'output_file_name': ''},
+                queue='high_priority'  # Assign to high-priority queue
+            ) 
             return Response({"message": "Verification task triggered successfully"}, status=200)
 
         except Exception as e:
