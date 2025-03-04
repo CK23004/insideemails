@@ -1139,9 +1139,9 @@ def verify_emails_in_parallel(sender, proxy_host, proxy_port, proxy_user, proxy_
         for email in email_list
     )
 
-    workflow = chord(verification_tasks)(process_first_round_results.s(batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name).set(queue=queue_name))
-    workflow.apply_async(queue=queue_name)
-    return
+    return chord(verification_tasks)(process_first_round_results.s(batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name).set(queue=queue_name))
+
+    
 
 
 # # Get progress for a batch

@@ -705,7 +705,9 @@ def generate_token():
 
 class APIKeyAuthentication(BaseAuthentication):
     def authenticate(self, request):
+        print("issue headers1")
         api_key = request.headers.get("Authorization")
+        print("issue headers")
         if not api_key:
             return None
 
@@ -713,8 +715,8 @@ class APIKeyAuthentication(BaseAuthentication):
 
         user_profile = db.userprofile.find_one({"api_key": api_key})
         if not user_profile:
-            return Response({"error": "Invalid API Key"}, status=401)
-
+            raise AuthenticationFailed("Invalid API Key")
+        print("userprofile")
         return (user_profile, None)
 
 # View to create API Key
@@ -733,7 +735,7 @@ class CreateAPIKeyView(APIView):
             user_profile = {
             "wpuser_id": user_id,
             "api_key": token,
-            "created_at": timezone.now
+            "created_at": timezone.now()
             }
             db.userprofile.insert_one(user_profile)
             # Update WordPress usermeta
@@ -758,14 +760,15 @@ class VerifyEmailsAPIView(APIView):
         try:
             data = request.data
             email_list = data.get("email_list", [])
-            
             if not email_list or not isinstance(email_list, list):
                 return Response({"error": "Invalid email list format"}, status=400)
             
-            if len(email_list) > 50000:
-                return Response({"error": "Maximum email list size is 50,000 per request"}, status=400)
+            email_list = list(dict.fromkeys(email_list))
             
-            customer_id = request.user.get("wpuser_id")  
+            if len(email_list) > 50000:
+                email_list = email_list[:50000] 
+            user_profile = request.user  # This comes from APIKeyAuthentication
+            customer_id = user_profile.get("wpuser_id") 
 
             wallet_url = f"https://insideemails.com/wp-json/wsfw-route/v1/wallet/{customer_id}?consumer_key={CONSUMER_KEY}&consumer_secret={CONSUMER_SECRET}"
             wallet_response = requests.get(wallet_url)
@@ -786,7 +789,7 @@ class VerifyEmailsAPIView(APIView):
                 "wpuser_id": customer_id,
                 "service_type": "email_verification_through_api",
                 "results": json.dumps({}),
-                "created_at": timezone.now
+                "created_at": f"{timezone.now()}"
             }
             redis_client.hset(f"batch:{batch_id}", mapping=batch_task_data)
             redis_client.expire(f"batch:{batch_id}", 86400)
