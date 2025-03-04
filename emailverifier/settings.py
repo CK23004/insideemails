@@ -142,12 +142,9 @@ DATABASES = {
 #     host="mongodb+srv://insideemails-django:h_jupW!6kK9nn7V@insideemails.5cqxj.mongodb.net/?retryWrites=true&w=majority&appName=insideemails",  # Change if using a different host
 #     alias="default",  # Default connection alias
 # )
-username = "admin"
-password = "hc$#@xf44"
-
 # URL encode the username and password
-encoded_username = quote_plus(username)
-encoded_password = quote_plus(password)
+encoded_username = quote_plus("admin")
+encoded_password = quote_plus("hc$#@xf44")
 connect(
     db="insideemails",  # Your MongoDB database name
     host=f"mongodb://{encoded_username}:{encoded_password}@157.20.172.27:27017/?authSource=admin",  # Change if using a different host

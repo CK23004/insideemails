@@ -5,47 +5,82 @@ from urllib.parse import parse_qs
 import redis.asyncio as aioredis
 
 
+# class PostUpdateConsumer(AsyncWebsocketConsumer):
+#     async def connect(self):
+#         self.redis = await aioredis.from_url("redis://localhost:6379/1")
+#         self.queue_key = f"post_updates_queue:{self.channel_name}"
+        
+#         await self.channel_layer.group_add("global_progress", self.channel_name)
+#         await self.accept()
+#         print(f"WebSocket connected: {self.channel_name}")
+        
+#         await self.send_pending_updates()
+
+#     async def disconnect(self, close_code):
+#         await self.channel_layer.group_discard("global_progress", self.channel_name)
+#         await self.redis.close()
+#         print(f"WebSocket disconnected: {self.channel_name}")
+
+#     async def progress_update(self, event):
+#         post_id = event['post_id']
+#         post_content = event['post_content']
+#         update_data = json.dumps({'post_id': post_id, 'post_content': post_content})
+
+#         # Queue the update in Redis (right-push for FIFO queue)
+#         await self.redis.rpush(self.queue_key, update_data)
+
+#         # If client is connected, send update immediately
+#         if self.scope['type'] == 'websocket':
+#             await self.send(text_data=update_data)
+
+#     async def send_pending_updates(self):
+#         # Drain the queue and send all pending updates
+#         while True:
+#             update = await self.redis.lpop(self.queue_key)
+#             if update is None:
+#                 break
+#             await self.send(text_data=update.decode())
+
 class PostUpdateConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.redis = await aioredis.from_url("redis://localhost:6379/1")
+        self.queue_key = f"post_updates_queue:{self.channel_name}"
+        
         await self.channel_layer.group_add("global_progress", self.channel_name)
         await self.accept()
-        print("WebSocket connected")
-        await self.send_pending_updates()
+        print(f"WebSocket connected: {self.channel_name}")
 
     async def disconnect(self, close_code):
         await self.channel_layer.group_discard("global_progress", self.channel_name)
         await self.redis.close()
-        print("WebSocket disconnected")
+        print(f"WebSocket disconnected: {self.channel_name}")
 
     async def progress_update(self, event):
         post_id = event['post_id']
         post_content = event['post_content']
-        
-        # Store/update the latest data for the unique post_id in Redis
-        await self.redis.hset("post_updates", post_id, json.dumps({
-            'post_id': post_id,
-            'post_content': post_content
-        }))
-        
-        # Push data if client is online
-        await self.send(text_data=json.dumps({
-            'post_id': post_id,
-            'post_content': post_content
-        }))
-        
-        # Remove the sent data
-        latest_data = await self.redis.hget("post_updates", post_id)
-        if latest_data and json.loads(latest_data.decode())['post_content'] == post_content:
-            await self.redis.hdel("post_updates", post_id)
+        update_data = json.dumps({'post_id': post_id, 'post_content': post_content})
+
+        # Store the update in Redis queue (FIFO)
+        await self.redis.rpush(self.queue_key, update_data)
+
+    async def receive(self, text_data):
+        # Client sends "poll" request to fetch updates
+        data = json.loads(text_data)
+        if data.get('action') == 'poll':
+            await self.send_pending_updates()
 
     async def send_pending_updates(self):
-        pending_updates = await self.redis.hgetall("post_updates")
-        for post_id, data in pending_updates.items():
-            await self.send(text_data=data.decode())
-            await self.redis.hdel("post_updates", post_id)
+        # Collect all updates from Redis queue
+        updates = []
+        while True:
+            update = await self.redis.lpop(self.queue_key)
+            if update is None:
+                break
+            updates.append(json.loads(update.decode()))
 
-
+        # Send all pending updates in one go
+        if updates:
+            await self.send(text_data=json.dumps({'updates': updates}))
 
 class AlertConsumer(AsyncWebsocketConsumer):
     async def connect(self):
@@ -88,3 +123,31 @@ class AlertConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=session_alert.decode())
             await self.redis.hdel("alerts", self.session_id)
 
+class IPBasedConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        # Get client IP from query params (passed directly in the WebSocket URL)
+        query_params = dict((x.split('=') for x in self.scope['query_string'].decode().split('&')))
+        self.client_ip = query_params.get('client_ip')
+
+        if not self.client_ip:
+            await self.close()
+            return
+
+        # Create group name based on client IP
+        self.group_name = f"dailyfree_progress_{self.client_ip}"
+
+        # Add client to their IP-based group
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def forward_message(self, event):
+        # Send the progress update to the client
+        await self.send(text_data=json.dumps({
+            'email' : event['email'],
+            "status" : event['status'],
+         }))
+
+    

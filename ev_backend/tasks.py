@@ -20,6 +20,7 @@ from celery import shared_task
 import motor.motor_asyncio
 from pymongo import MongoClient, ASCENDING, UpdateOne
 from django.conf import settings
+from urllib.parse import quote_plus
 
 
 if sys.platform == 'win32':
@@ -32,8 +33,9 @@ async def get_redis_batch_connection():
 redis_result = redis.Redis(host='localhost', port=6379, db=1)
 
 
-
-mongo_client = MongoClient(f"mongodb://{settings.encoded_username}:{settings.encoded_password}@157.20.172.27:27017/?authSource=admin", maxPoolSize=4000) 
+encoded_username = quote_plus("admin")
+encoded_password = quote_plus("hc$#@xf44")
+mongo_client = MongoClient(f"mongodb://{encoded_username}:{encoded_password}@157.20.172.27:27017/?authSource=admin", maxPoolSize=4000) 
 # mongo_client = motor.motor_asyncio.AsyncIOMotorClient(settings.MONGO_URI, maxPoolSize=3600)
 db = mongo_client["insideemails"]
 db.email_data.create_index([("email", ASCENDING)], unique=True)  # Email index
@@ -45,6 +47,7 @@ db.catch_all_domains.create_index([("domain", ASCENDING)], unique=True)
 
 def update(batch_id, progress):
     batch_key = f'batch:{batch_id}'
+    redis_client.hset(batch_key, "progress", progress)
     data = redis_client.hgetall(batch_key)
     batch_task = {key.decode(): value.decode() for key, value in data.items()}
     
@@ -55,6 +58,7 @@ def update(batch_id, progress):
     post_id = batch_task.get('post_id', '')
     initial_count = batch_task.get('initial_count', '')
     status = batch_task.get('status', 'Processing')
+    client_ip = batch_task.get('client_ip') or None
     results = json.loads(batch_task.get('results', '{}'))
 
     if  service_type == 'bulk_verify':
@@ -65,11 +69,11 @@ def update(batch_id, progress):
             # Assign counts with default value 0 if missing
             valid_count = status_counts.get("Valid", 0)
             invalid_count = status_counts.get("Invalid", 0)
-            no_mx = status_counts.get("No MX Records Found", 0)
-            spamBlock_count = status_counts.get("Spam Block", 0)
-            risky_count = status_counts.get("Catch All", 0)
+            # no_mx = status_counts.get("Invalid", 0)
+            # spamBlock_count = status_counts.get("Spam Block", 0)
+            catchall_count = status_counts.get("Catch All", 0)
             unknown_count = status_counts.get("Unknown", 0)
-            tempLimited_count = status_counts.get("Temporarily Limited", 0)
+            disposable_count = status_counts.get("Disposable", 0)
 
             # Save DataFrame to CSV
             output_file_name = batch_task.get("output_file_name")
@@ -85,25 +89,42 @@ def update(batch_id, progress):
 
             post_update_payload = {
                 "post_id": post_id,
-                "post_content": f'<div id="status" class="d-none">{status}</div>'
-                                f'<div id="email_count" class="d-none">{initial_count}</div>'
-                                f'<div id="progress" class="d-none">{progress}</div><br> '
-                                f'[email_verification_report output_file_url=f"{output_file_url}" '
-                                f'deliverable_count={valid_count} undeliverable_count={invalid_count} '
-                                f'risky_count={risky_count} unknown_count={unknown_count}'
-                                f'spamBlock_count={spamBlock_count} tempLimited_count={tempLimited_count} '
-                                f'nomx_count={no_mx}'
+                "post_content": f'<div id="status" style="display: none;">{status}</div>'
+                                f'<div id="email_count" style="display: none;">{initial_count}</div>'
+                                f'<div id="progress" style="display: none;">{progress}</div><br> '
+                                f'<div id="download-btn" style="display: none;">{output_file_url}</div> '
+                                f'<div id="deliverable_count" style="display: none;">{valid_count}</div><br> '
+                                f'<div id="undeliverable_count" style="display: none;">{invalid_count}</div><br> '
+                                f'<div id="catchall_count" style="display: none;">{catchall_count}</div><br> '
+                                f'<div id="unknown_count" style="display: none;">{unknown_count}</div><br> '
+                                f'<div id="disposable_count" style="display: none;">{disposable_count}</div><br> '
+                                f'[email_verification_report output_file_url="{output_file_url}" '
+                                f'output_file_name="{output_file_name}" deliverable_count={valid_count} undeliverable_count={invalid_count} '
+                                f'catchall_count={catchall_count} unknown_count={unknown_count} '
+                                f'disposable_count={disposable_count} '
                                 f'total_count={initial_count}]'
             }
         else:
             post_update_payload = {
                 "post_id": post_id,
-                "post_content": f'<div id="status" class="d-none">{status}</div>'
-                                f'<div id="email_count" class="d-none">{initial_count}</div>'
-                                f'<div id="progress" class="d-none">{progress}</div>'
-                                f'<br> <a href="#" class="d-none"></a>',
+                "post_content": f'<div id="status" style="display: none;">{status}</div>'
+                                f'<div id="email_count" style="display: none;">{initial_count}</div>'
+                                f'<div id="progress" style="display: none;">{progress}</div>'
+                                f'<br><div id="download-btn" style="display: none;"></div> '
             }
         return post_update_payload
+    elif service_type == 'single_verify_daily':
+        email, dailystatus = next(iter(results.items()), (None, None))
+            
+        post_update_payload = {
+            "client_ip": client_ip,
+            "email": email,
+            "status" : dailystatus
+
+        }
+        return post_update_payload
+
+
 
     elif service_type == 'single_verify':
         if progress == 100:
@@ -111,8 +132,8 @@ def update(batch_id, progress):
             value = next(iter(results.values()), None)  # Prevent StopIteration
             post_update_payload = {
                 "post_id": post_id,
-                "post_content": f'<div id="status" class="d-none">{value}</div>'
-                                f'<div id="progress" class="d-none">{progress}</div>',
+                "post_content": f'<div id="status" style="display: none;">{value}</div>'
+                                f'<div id="progress" style="display: none;">{progress}</div>',
             }
             return post_update_payload
         else:
@@ -127,22 +148,20 @@ def update(batch_id, progress):
 
             post_update_payload = {
                 "post_id": post_id,
-                "post_content": f'<div id="status" class="d-none">Completed</div>'
-                                f'<div id="progress" class="d-none">{progress}</div>'
+                "post_content": f'<div id="status" style="display: none;">Completed</div>'
+                                f'<div id="progress" style="display: none;">{progress}</div>'
                                 f'<div id="emails">{", ".join(valid_emails_found)}</div>',
             }
         else:
             post_update_payload = {
                 "post_id": post_id,
-                "post_content": f'<div id="status" class="d-none">Processing</div>'
-                                f'<div id="progress" class="d-none">{progress}</div>'
+                "post_content": f'<div id="status" style="display: none;">Processing</div>'
+                                f'<div id="progress" style="display: none;">{progress}</div>'
                                 f'<div id="emails"></div>',
             }
         
         return post_update_payload
-    else:
-        redis_client.hset(batch_key, "progress", progress)
-        return
+
 
 
 
@@ -177,11 +196,11 @@ def update(batch_id, progress):
 #                 # Extract counts with defaults
 #                 valid_count = status_counts.get("Valid", 0)
 #                 invalid_count = status_counts.get("Invalid", 0)
-#                 no_mx = status_counts.get("No MX Records Found", 0)
+#                 no_mx = status_counts.get("Invalid", 0)
 #                 spamBlock_count = status_counts.get("Spam Block", 0)
 #                 risky_count = status_counts.get("Catch All", 0)
 #                 unknown_count = status_counts.get("Unknown", 0)
-#                 tempLimited_count = status_counts.get("Temporarily Limited", 0)
+#                 tempLimited_count = status_counts.get("Disposable", 0)
 
 #                 output_file_name = batch.get("output_file_name", "")
 #                 if output_file_name:
@@ -194,9 +213,9 @@ def update(batch_id, progress):
 #                 post_update_payload = {
 #                     "post_id": batch.get("post_id"),
 #                     "post_content": f'''
-#                         <div id="status" class="d-none">{batch.get("status")}</div>
-#                         <div id="email_count" class="d-none">{batch.get("initial_count", 0)}</div>
-#                         <div id="progress" class="d-none">{progress}</div>
+#                         <div id="status" style="display: none;">{batch.get("status")}</div>
+#                         <div id="email_count" style="display: none;">{batch.get("initial_count", 0)}</div>
+#                         <div id="progress" style="display: none;">{progress}</div>
 #                         <br> [email_verification_report output_file_url="{output_file_url}" 
 #                         deliverable_count={valid_count} undeliverable_count={invalid_count} 
 #                         risky_count={risky_count} unknown_count={unknown_count} 
@@ -207,10 +226,10 @@ def update(batch_id, progress):
 #                 post_update_payload = {
 #                     "post_id": batch.get("post_id"),
 #                     "post_content": f'''
-#                         <div id="status" class="d-none">{batch.get("status")}</div>
-#                         <div id="email_count" class="d-none">{batch.get("initial_count", 0)}</div>
-#                         <div id="progress" class="d-none">{progress}</div>
-#                         <br> <a href="#" class="d-none"></a>'''
+#                         <div id="status" style="display: none;">{batch.get("status")}</div>
+#                         <div id="email_count" style="display: none;">{batch.get("initial_count", 0)}</div>
+#                         <div id="progress" style="display: none;">{progress}</div>
+#                         <br> <a href="#" style="display: none;"></a>'''
 #                 }
 
 #         elif batch.get("service_type") == "single_verify":
@@ -219,8 +238,8 @@ def update(batch_id, progress):
 #                 post_update_payload = {
 #                     "post_id": batch.get("post_id"),
 #                     "post_content": f'''
-#                         <div id="status" class="d-none">{value}</div>
-#                         <div id="progress" class="d-none">{progress}</div>'''
+#                         <div id="status" style="display: none;">{value}</div>
+#                         <div id="progress" style="display: none;">{progress}</div>'''
 #                 }
 #             else:
 #                 return  # Avoid sending unnecessary requests
@@ -243,16 +262,16 @@ def update(batch_id, progress):
 #                 post_update_payload = {
 #                     "post_id": batch.get("post_id"),
 #                     "post_content": f'''
-#                         <div id="status" class="d-none">Completed</div>
-#                         <div id="progress" class="d-none">{progress}</div>
+#                         <div id="status" style="display: none;">Completed</div>
+#                         <div id="progress" style="display: none;">{progress}</div>
 #                         <div id="emails">{", ".join(valid_emails_found)}</div>'''
 #                 }
 #             else:
 #                 post_update_payload = {
 #                     "post_id": batch.get("post_id"),
 #                     "post_content": f'''
-#                         <div id="status" class="d-none">Processing</div>
-#                         <div id="progress" class="d-none">{progress}</div>
+#                         <div id="status" style="display: none;">Processing</div>
+#                         <div id="progress" style="display: none;">{progress}</div>
 #                         <div id="emails"></div>'''
 #                 }
 
@@ -372,11 +391,11 @@ def generate_unique_file_name(output_file_name):
                     
 #                     valid_count = status_counts.get("Valid", 0)
 #                     invalid_count = status_counts.get("Invalid", 0)
-#                     no_mx = status_counts.get("No MX Records Found", 0)
+#                     no_mx = status_counts.get("Invalid", 0)
 #                     spamBlock_count = status_counts.get("Spam Block", 0)
 #                     risky_count = status_counts.get("Catch All", 0)
 #                     unknown_count = status_counts.get("Unknown", 0)
-#                     tempLimited_count = status_counts.get("Temporarily Limited", 0)
+#                     tempLimited_count = status_counts.get("Disposable", 0)
 #                     output_file_name = generate_unique_file_name(output_file_name)
 #                     media_path = os.path.join(settings.MEDIA_ROOT, output_file_name)
 #                     os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
@@ -385,9 +404,9 @@ def generate_unique_file_name(output_file_name):
 #                     await update_file_name(batch_id, output_file_name)
 #                     post_update_payload = {
 #                         "post_id": post_id,
-#                         "post_content": f'''<div id="status" class="d-none">{batch_status}</div>
-#                                             <div id="email_count" class="d-none">{initial_count}</div>
-#                                             <div id="progress" class="d-none">{progress}</div><br> 
+#                         "post_content": f'''<div id="status" style="display: none;">{batch_status}</div>
+#                                             <div id="email_count" style="display: none;">{initial_count}</div>
+#                                             <div id="progress" style="display: none;">{progress}</div><br> 
 #                                             [email_verification_report output_file_url="{output_file_url}" 
 #                                             deliverable_count={valid_count} 
 #                                             undeliverable_count={invalid_count} 
@@ -400,10 +419,10 @@ def generate_unique_file_name(output_file_name):
 #                 else:
 #                     post_update_payload = {
 #                         "post_id": post_id,
-#                         "post_content": f'''<div id="status" class="d-none">{batch_status}</div>
-#                                             <div id="email_count" class="d-none">{initial_count}</div>
-#                                             <div id="progress" class="d-none">{progress}</div>
-#                                             <br> <a href='#' class="d-none"></a>''',
+#                         "post_content": f'''<div id="status" style="display: none;">{batch_status}</div>
+#                                             <div id="email_count" style="display: none;">{initial_count}</div>
+#                                             <div id="progress" style="display: none;">{progress}</div>
+#                                             <br> <a href='#' style="display: none;"></a>''',
 #                     }
 
 #             elif service_type == 'single_verify':
@@ -414,8 +433,8 @@ def generate_unique_file_name(output_file_name):
 #                     print(f'value : {value}')
 #                     post_update_payload = {
 #                         "post_id": post_id,
-#                         "post_content": f'''<div id="status" class="d-none">{value}</div>
-#                                             <div id="progress" class="d-none">{progress}</div>''',
+#                         "post_content": f'''<div id="status" style="display: none;">{value}</div>
+#                                             <div id="progress" style="display: none;">{progress}</div>''',
 #                     }
 #                 else:
 #                     return  # No update needed
@@ -436,15 +455,15 @@ def generate_unique_file_name(output_file_name):
 
 #                     post_update_payload = {
 #                         "post_id": post_id,
-#                         "post_content": f'''<div id="status" class="d-none">Completed</div>
-#                                             <div id="progress" class="d-none">{progress}</div>
+#                         "post_content": f'''<div id="status" style="display: none;">Completed</div>
+#                                             <div id="progress" style="display: none;">{progress}</div>
 #                                             <div id="emails">{", ".join(valid_emails_found)}</div>''',
 #                     }
 #                 else:
 #                     post_update_payload = {
 #                         "post_id": post_id,
-#                         "post_content": f'''<div id="status" class="d-none">Processing</div>
-#                                             <div id="progress" class="d-none">{progress}</div>
+#                         "post_content": f'''<div id="status" style="display: none;">Processing</div>
+#                                             <div id="progress" style="display: none;">{progress}</div>
 #                                             <div id="emails"></div>''',
 #                     }
             
@@ -559,16 +578,16 @@ def verify_email_via_smtp(sender, recipient, proxy_host, proxy_port, proxy_user,
             domain = recipient.split('@')[1]
             
             no_mx_entry = db.no_mx_domains.find_one({"domain": domain})
-            status = "No MX Records Found" if no_mx_entry else None
+            status = "Invalid" if no_mx_entry else None
             if (status is None):
                 mx_records = fetch_mx_records(domain)
                 if not mx_records:
                     db.no_mx_domains.update_one(
                             {"domain": domain},  # Filter by domain
-                            {"$set": {"checked_at": time()}},  # Update checked_at
+                            {"$set": {"checked_at": time.time()}},  # Update checked_at
                             upsert=True  # Insert if not exists
                         )
-                    status = "No MX Records Found"
+                    status = "Invalid"
                 else:
                     smtp_server = mx_records[0]
                     smtp_port = 25
@@ -588,7 +607,7 @@ def verify_email_via_smtp(sender, recipient, proxy_host, proxy_port, proxy_user,
                                 else:
                                     status =  "Invalid"
                             elif code in [450, 451, 452, 421]:
-                                status =  "Temporarily Limited"
+                                status =  "Disposable"
                             else:
                                 status = "Unknown"
                     except socket.timeout:
@@ -599,7 +618,7 @@ def verify_email_via_smtp(sender, recipient, proxy_host, proxy_port, proxy_user,
     batch_key = f"batch:{batch_id}"    
     with redis_client.pipeline() as pipe:
         comple = redis_client.hget(batch_key, "completed")
-        print(f"completed: {comple} round: 3" )
+        print(f"completed: {comple} round: {try_round}" )
         while True:
             try:
                 pipe.watch(batch_key)
@@ -623,10 +642,14 @@ def verify_email_via_smtp(sender, recipient, proxy_host, proxy_port, proxy_user,
         progress = 0
     triggers = json.loads(redis_client.hget(batch_key, "triggers") or "[]")  # Convert back to list
     print(triggers)
-    if progress in triggers:
+    last_progress = int(redis_client.hget(batch_key, "last_progress") or 0)
+    client_ip = redis_client.hget(batch_key, "client_ip")
+    client_ip = client_ip.decode() if client_ip else None
+    if progress in triggers and progress != last_progress:
         print("triggered in triggers")
+        redis_client.hset(batch_key, "last_progress", progress)
         post_content = update(batch_id, progress)
-        if post_content and progress!=100:
+        if post_content and progress!=100 and not client_ip:
             post_id = int(redis_client.hget(batch_key, "post_id") or 0)
             channel_layer = get_channel_layer()
             async_to_sync(channel_layer.group_send)(
@@ -651,28 +674,36 @@ def verify_email_for_catchall(sender, recipient, proxy_host, proxy_port, proxy_u
     status = "Catch All" if catch_all_domain else None
     if (status is None):
         mx_records = fetch_mx_records(domain)
-        smtp_server = mx_records[0]
-        smtp_port = 25
-        invalid_email = f"non8xistent1.@{domain}"
-        
-        try:
-            with ProxySMTP(smtp_server, smtp_port, proxy_host=proxy_host, proxy_port=proxy_port, proxy_user=proxy_user, proxy_password=proxy_password, timeout=60) as server:
-                server.ehlo()
-                server.mail(sender)
-                code, message = server.rcpt(invalid_email)
-                if code in [250, 251, 252]:
-                    db.catch_all_domains.update_one(
-                        {"domain": domain},  # Filter by domain
-                        {"$set": {"checked_at": time.time()}},  # Update checked_at
-                        upsert=True  # Insert if not exists
-                    )
-                    status = "Catch All"
-                else:
-                    status = "Valid"
-        except:
-            status = "Valid"
+        if not mx_records:
+            db.no_mx_domains.update_one(
+                    {"domain": domain},  # Filter by domain
+                    {"$set": {"checked_at": time.time()}},  # Update checked_at
+                    upsert=True  # Insert if not exists
+                )
+            status = "Invalid"
+        else:
+            smtp_server = mx_records[0]
+            smtp_port = 25
+            invalid_email = f"non8xistent1.@{domain}"
+            
+            try:
+                with ProxySMTP(smtp_server, smtp_port, proxy_host=proxy_host, proxy_port=proxy_port, proxy_user=proxy_user, proxy_password=proxy_password, timeout=60) as server:
+                    server.ehlo()
+                    server.mail(sender)
+                    code, message = server.rcpt(invalid_email)
+                    if code in [250, 251, 252]:
+                        db.catch_all_domains.update_one(
+                            {"domain": domain},  # Filter by domain
+                            {"$set": {"checked_at": time.time()}},  # Update checked_at
+                            upsert=True  # Insert if not exists
+                        )
+                        status = "Catch All"
+                    else:
+                        status = "Valid"
+            except:
+                status = "Unknown"
 
-        batch_key = f"batch:{batch_id}" 
+    batch_key = f"batch:{batch_id}" 
            
     with redis_client.pipeline() as pipe:
         comple = redis_client.hget(batch_key, "completed")
@@ -681,7 +712,6 @@ def verify_email_for_catchall(sender, recipient, proxy_host, proxy_port, proxy_u
             try:
                 pipe.watch(batch_key)
                 pipe.multi()
-                
                 pipe.hincrby(batch_key, "completed", 1)
                 print("INCREMENT")
                 pipe.execute()
@@ -701,10 +731,14 @@ def verify_email_for_catchall(sender, recipient, proxy_host, proxy_port, proxy_u
         progress = 0
     triggers = json.loads(redis_client.hget(batch_key, "triggers") or "[]")  # Convert back to list
     print(triggers)
-    if progress in triggers:
+    last_progress = int(redis_client.hget(batch_key, "last_progress") or 0)
+    client_ip = redis_client.hget(batch_key, "client_ip")
+    client_ip = client_ip.decode() if client_ip else None
+    if progress in triggers and progress != last_progress:
+        redis_client.hset(batch_key, "last_progress", progress)
         print("triggered in triggers")
         post_content = update(batch_id, progress)
-        if post_content and progress!=100:
+        if post_content and progress!=100 and not client_ip: 
             post_id = int(redis_client.hget(batch_key, "post_id") or 0)
             channel_layer = get_channel_layer()
             async_to_sync(channel_layer.group_send)(
@@ -892,21 +926,9 @@ def finalize_results(catch_all_results_list, first_round_results, batch_id):
             if email in first_round_results:
                 first_round_results[email] = new_status
 
-    unknown_domains = {email.split('@')[1] for email, status in first_round_results.items() if status == "Unknown"}
-    catch_all_domains = db.catch_all_domains.find({"domain": {"$in": list(unknown_domains)}})
-    catch_all_set = {doc["domain"] for doc in catch_all_domains}
-    for email, status in first_round_results.items():
-        if status == "Unknown":
-            domain = email.split('@')[1]
-            if domain in catch_all_set:
-                first_round_results[email] = "Catch All"
-    redis_client.hset(batch_key, "results", json.dumps(first_round_results))
-    redis_client.hset(batch_key, "status", "completed")
+    
 
     # Save results to CSV
-    output_file_name = redis_client.hget(batch_key, "output_file_name")
-    df = pd.DataFrame(list(first_round_results.items()), columns=["Email", "Status"])
-    print(f"output file name : {output_file_name}")
     # if output_file_name is None :
     #     output_file_name = "Test.csv"
     # media_path = os.path.join(settings.MEDIA_ROOT, output_file_name)
@@ -924,11 +946,28 @@ def finalize_results(catch_all_results_list, first_round_results, batch_id):
         result = collection.bulk_write(operations)
         print(f"Updated {result.modified_count} documents in MongoDB.")
 
+    for email, status in first_round_results.items():
+        if status == "Spam Block" or status == "No MX Records Found":
+            first_round_results[email] = "Invalid"
+    redis_client.hset(batch_key, "results", json.dumps(first_round_results))
+    redis_client.hset(batch_key, "status", "completed")
+
     print(f"Completed processing for batch {batch_id}")
     data = redis_client.hgetall(batch_key)
     json_data = {key.decode(): value.decode() for key, value in data.items()}
     post_content = update(batch_id, 100)
-    if post_content:
+    client_ipaddr =  json_data.get('client_ip') or None
+    if client_ipaddr and post_content:
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"dailyfree_progress_{client_ipaddr}",
+            {
+                "type": "forward.message",
+                "email": post_content["email"],
+                "status": post_content["status"]
+            }
+        )
+    if post_content and not client_ipaddr:
         post_id = int(redis_client.hget(batch_key, "post_id") or 0)
         channel_layer = get_channel_layer()
         async_to_sync(channel_layer.group_send)(
@@ -1068,7 +1107,7 @@ def finalize_results(catch_all_results_list, first_round_results, batch_id):
 #     threading.Thread(target=run_event_loop, daemon=True).start()
 
 @shared_task
-def verify_emails_in_parallel(sender, proxy_host, proxy_port, proxy_user, proxy_password, email_list, service_type, wpuser_id=0, post_id=0, output_file_name='', batch_id=None):
+def verify_emails_in_parallel(sender, proxy_host, proxy_port, proxy_user, proxy_password, email_list, service_type, wpuser_id=0, post_id=0, output_file_name='',client_ip='', batch_id=None):
     if not batch_id:
         batch_id = f"batch_{int(time.time())}"
     total_emails = len(email_list)
@@ -1083,6 +1122,7 @@ def verify_emails_in_parallel(sender, proxy_host, proxy_port, proxy_user, proxy_
         "completed": 0,
          "triggers": json.dumps(sorted_triggers),
         "status": "processing",
+        "client_ip": client_ip,
         "post_id": post_id,
         "wpuser_id": wpuser_id,
         "service_type": service_type,

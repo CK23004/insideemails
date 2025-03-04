@@ -24,7 +24,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import AuthenticationFailed
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
-
+from django.utils import timezone
 from .models import BatchTask, UserProfile
 from .tasks import db
 def index(request):
@@ -209,7 +209,7 @@ class BulkEmailVerifyAPIView(APIView):
             if "15" in file_data:
                 file_info = file_data["15"]
                 file_url = file_info.get("value")
-                file_name = file_info.get("file_original", "Untitled.csv")
+                # file_name = file_info.get("file_original", "Untitled.csv")
                 file_ext = file_info.get("ext")
 
                 if file_ext not in ["csv", "txt"]:
@@ -227,8 +227,8 @@ class BulkEmailVerifyAPIView(APIView):
                 if file_ext == "csv":
                     reader = csv.reader(file_stream)
                     for row in reader:
-                        for col in row:
-                            email = col.strip()
+                        if row:  # Ensure row is not empty
+                            email = row[0].strip()  # Get only the first column (index 0)
                             if is_email(email):
                                 email_list.append(email)
                 elif file_ext == "txt":
@@ -237,13 +237,50 @@ class BulkEmailVerifyAPIView(APIView):
                         if is_email(email):
                             email_list.append(email)
 
+            
+
             # Process manual email input
             else:
                 email_string = file_data.get("8", {}).get("value", "")
                 email_list = [email.strip() for email in email_string.split("\r\n") if is_email(email)]
-                file_name = "Untitled.csv"
+                # file_name = "Untitled.csv"
+            
+            if not email_list:
+                async_to_sync(channel_layer.group_send)(
+                        f"user_{session_id}",
+                        {"type": "alert.message", "message": "Email List is Empty."}
+                    )
+                post_update_payload = {
+                    "post_id": post_id,
+                    "post_content":  f'<div id="status" class="d-none">Failed</div>'
+                                    f'<div id="email_count" class="d-none">{email_count}</div>'
+                                    f'<div id="progress" class="d-none">0</div>'
+                                    f'<br> <a href="#" class="d-none"></a>',
+                }
+                async_to_sync(channel_layer.group_send)(
+                    "global_progress",
+                    {
+                        "type": "progress_update",
+                        "post_id": post_id,
+                        "post_content": post_update_payload["post_content"]
+                    }
+                )
+                return Response({"message": "Email List is Empty."}, status=200)
 
+
+            #list name 
+            for field in file_data.values():
+                if field.get('name') == 'List Name':
+                    file_name = field.get('value','Untitled.csv')
+    
+            email_list = list(dict.fromkeys(email_list)) #de-duplication of list 
             email_count = len(email_list)
+
+            if email_count > 50000:
+                email_list = email_list[:50000]  # Keep only the first 50,000 emails
+                email_count = len(email_list)
+
+
             post_update_payload = {
                 "post_id": post_id,
                 "post_content": f'<div id="status" class="d-none">Pending</div>'
@@ -260,29 +297,7 @@ class BulkEmailVerifyAPIView(APIView):
                 }
             )
 
-            if email_count > 50000:
-                async_to_sync(channel_layer.group_send)(
-                        f"user_{session_id}",
-                        {"type": "alert.message", "message": "Maximum email list size is 50,000 Per Request"}
-                    )
-                
-                post_update_payload = {
-                "post_id": post_id,
-                "post_content": f'<div id="status" class="d-none">Failed</div>'
-                                f'<div id="email_count" class="d-none">{email_count}</div>'
-                                f'<div id="progress" class="d-none">0</div>'
-                                f'<br> <a href="#" class="d-none"></a>',
-                }
-                async_to_sync(channel_layer.group_send)(
-                    "global_progress",
-                    {
-                        "type": "progress_update",
-                        "post_id": post_id,
-                        "post_content": post_update_payload["post_content"]
-                    }
-                )
-                    
-                return Response({"error": "Maximum email list size is 50,000 per request"}, status=200)
+            
             
             #INSUFFICIENT CREDITS  MESSAGE
             session_id = data.get("session_id", None)
@@ -319,7 +334,7 @@ class BulkEmailVerifyAPIView(APIView):
             wallet_action(wp_user_id, action="debit", credit_count=email_count, file_name=file_name)
 
             # Generate output filename
-            output_file_name = f"{os.path.splitext(file_name)[0]}_{wp_user_id}{post_id}.csv" if post_id else f"Untitled_{wp_user_id}.csv"
+            output_file_name = f"{file_name}_{wp_user_id}{post_id}.csv" if post_id else f"Untitled_{wp_user_id}.csv"
 
             # Trigger Celery task
             if email_list:
@@ -372,8 +387,71 @@ class BulkEmailVerifyAPIView(APIView):
 #             return JsonResponse({"error": "Invalid JSON data"}, status=400)
 #         except Exception as e:
 #             return JsonResponse({"error": str(e)}, status=500)
-    
-        
+
+class DailySingleEmailVerifyAPIView(APIView):
+    authentication_classes = [TokenAuthentication]  # Only use custom authentication
+
+    def post(self, request):
+        try:
+            data = request.data  # DRF automatically parses JSON body
+            client_ip = data.get("client_ip")
+            form_data = data.get("form_data", {})
+            email_id = None
+
+            print(data)
+            # Extract email from form_data
+            for key, field in form_data.items():
+                if field.get("type") == "email":
+                    email_id = field.get("value")
+                    break
+            
+            if not email_id:
+                return Response({"error": "No email found in form_data"}, status=400)
+
+            today = datetime.datetime.now().strftime('%Y-%m-%d')
+            redis_key = f"daily_email_verifications:{today}"
+            field = client_ip
+
+            # Get current count or default to 0
+            count = int(redis_client.hget(redis_key, field) or 0)
+            if count > 3:
+                    post_content = {
+                        "client_ip": client_ip,
+                        "email": email_id,
+                        "status" : "Daily Quota Exceeded..!"
+                    }
+                  
+                    async_to_sync(channel_layer.group_send)(
+                        f"dailyfree_progress_{client_ip}",
+                        {
+                            "type": "forward.message",
+                            "email": post_content["email"],
+                            "status": post_content["status"]
+                        }
+                    )
+
+                    return Response({"message": "Daily Limit Reached"}, status=200)
+            
+            redis_client.hincrby(redis_key, field, 1)
+
+            # Ensure the key expires at midnight
+            redis_client.expireat(redis_key, datetime.datetime.now().replace(hour=23, minute=59, second=59))   
+            # Trigger Celery task
+            verify_emails_in_parallel.delay(
+                sender_email, proxy_host, proxy_port, proxy_user, 
+                proxy_password, [email_id], service_type='single_verify_daily', client_ip = client_ip,
+                output_file_name=''
+            )
+            print('triggered')
+            return Response({"message": "Verification task triggered successfully"}, status=200)
+
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON data"}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
+
 class SingleEmailVerifyAPIView(APIView):
     authentication_classes = [TokenAuthentication]  # Only use custom authentication
 
@@ -565,7 +643,7 @@ class EmailFinderAPIView(APIView):
                             "post_content": post_update_payload["post_content"]
                         }
                     )
-                return Response({"message": "Insufficient Credits (You Need Minimum 10 credits to Find Emails)"}, status=200)
+                    return Response({"message": "Insufficient Credits (You Need Minimum 10 credits to Find Emails)"}, status=200)
             # Call Celery task
             verify_emails_in_parallel.delay(
                 sender_email, proxy_host, proxy_port, proxy_user, 
@@ -650,7 +728,8 @@ class CreateAPIKeyView(APIView):
             
             user_profile = {
             "wpuser_id": user_id,
-            "api_key": token
+            "api_key": token,
+            "created_at": timezone.now
             }
             db.userprofile.insert_one(user_profile)
             # Update WordPress usermeta
@@ -702,10 +781,12 @@ class VerifyEmailsAPIView(APIView):
                 "status": "pending",
                 "wpuser_id": customer_id,
                 "service_type": "email_verification_through_api",
-                "results": json.dumps({})
+                "results": json.dumps({}),
+                "created_at": timezone.now
             }
             redis_client.hset(f"batch:{batch_id}", mapping=batch_task_data)
             redis_client.expire(f"batch:{batch_id}", 86400)
+            db.apibatchtask.insert_one(batch_task_data)
             # Call Celery task
             verify_emails_in_parallel.delay(
                 sender_email, proxy_host, proxy_port, proxy_user, 
@@ -860,6 +941,8 @@ def subscription_credits_update(request):
             return JsonResponse({"error": "Invalid JSON data"}, status=400)
 
     return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
 
 
 

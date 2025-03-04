@@ -6,9 +6,9 @@ from django.contrib.auth.hashers import make_password, check_password
 from mongoengine import (
     Document, UUIDField, StringField, IntField, DictField, DateTimeField, EmailField, BooleanField
 )
-import datetime
+from django.utils import timezone
 class UserProfile(Document):
-    created_at = DateTimeField(default=datetime.datetime.now)
+    created_at = DateTimeField(default=timezone.now)
     wpuser_id = IntField(unique=True, required=True)
     api_key = StringField(max_length=32, unique=True, default=None)
 
@@ -31,26 +31,22 @@ class BatchTask(Document):
     status = StringField(max_length=50, default="pending")  # Task status
     spam_block_retries = IntField(null=True, blank=True)
     valid_email_retries = IntField(null=True, blank=True)
-
-    # Store JSON data instead of using TextField
-    part1 = DictField(null=True, blank=True)
-    part2 = DictField(null=True, blank=True)
-    part3 = DictField(null=True, blank=True)
-    part4 = DictField(null=True, blank=True)
-
     post_id = IntField(null=True, blank=True)  # WooCommerce Post ID
     wpuser_id = IntField(null=True, blank=True)  # WordPress User ID
     service_type = StringField(max_length=100, null=True, blank=True)  # Service type
     results = DictField(default=dict)  # Store email results
-
+    created_at = DateTimeField(default=timezone.now)
     def __str__(self):
         return f"BatchTask {self.batch_id} - {self.status}"
-
+    meta = {
+        'collection': 'batchtask',  # Optional: Defines MongoDB collection name
+        'ordering': ['-created_at']
+    }
 
 class EmailData(Document):
     email = EmailField(unique=True, required=True)
     status = StringField(max_length=50, required=True)
-    checked_at = DateTimeField()
+    checked_at = DateTimeField(default=timezone.now)
 
     def __str__(self):
         return f"{self.email} - {self.status}"
@@ -58,7 +54,7 @@ class EmailData(Document):
 
 class CatchAllDomains(Document):
     domain = StringField(unique=True, max_length=50, required=True)
-    checked_at = DateTimeField()
+    checked_at = DateTimeField(default=timezone.now)
 
     def __str__(self):
         return f"CatchAll: {self.domain}"
@@ -66,7 +62,7 @@ class CatchAllDomains(Document):
 
 class NoMXDomains(Document):
     domain = StringField(unique=True, max_length=50, required=True)
-    checked_at = DateTimeField()
+    checked_at = DateTimeField(default=timezone.now)
 
     def __str__(self):
         return f"NoMX: {self.domain}"
