@@ -760,7 +760,7 @@ redis_client = redis.Redis(host="localhost", port=6379, db=1)
 
 
 @shared_task
-def process_first_round_results(first_round_results_list, batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password):
+def process_first_round_results(first_round_results_list, batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name):
     """Processes first-round results and triggers spam-block retry using Redis for async batch tracking."""
     first_round_results = {email: status for result in first_round_results_list for email, status in result.items()}
 
@@ -795,17 +795,17 @@ def process_first_round_results(first_round_results_list, batch_id, sender, prox
 
         # Create retry tasks for spam-blocked emails
         retry_tasks = group(
-            verify_email_via_smtp.s(sender, email, proxy_host, proxy_port, proxy_user, proxy_password, batch_id, total_emails, try_round=2) 
+            verify_email_via_smtp.s(sender, email, proxy_host, proxy_port, proxy_user, proxy_password, batch_id, total_emails, try_round=2).set(queue=queue_name) 
             for email in spam_blocked_emails
         )
 
         # Execute tasks and process spam block results
-        return chord(retry_tasks)(process_spam_block_results.s(first_round_results, batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password))
+        return chord(retry_tasks)(process_spam_block_results.s(first_round_results, batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name).set(queue=queue_name) )
     else:
-        return process_spam_block_results([], first_round_results, batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password)
+        return process_spam_block_results([], first_round_results, batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name)
     
 @shared_task
-def process_spam_block_results(retry_results_list , first_round_results , batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password):
+def process_spam_block_results(retry_results_list , first_round_results , batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name):
     """Merges spam-block retry results and triggers valid email processing."""
     
 
@@ -845,13 +845,13 @@ def process_spam_block_results(retry_results_list , first_round_results , batch_
         })
 
         catch_all_tasks = group(
-            verify_email_for_catchall.s(sender, email, proxy_host, proxy_port, proxy_user, proxy_password, batch_id, total_emails) 
+            verify_email_for_catchall.s(sender, email, proxy_host, proxy_port, proxy_user, proxy_password, batch_id, total_emails).set(queue=queue_name) 
             for email in valid_emails
         )
         print(f" SB {first_round_results}")
-        return chord(catch_all_tasks)(finalize_results.s(first_round_results, batch_id))
+        return chord(catch_all_tasks)(finalize_results.s(first_round_results, batch_id, queue_name).set(queue=queue_name))
     else:
-        return finalize_results([], first_round_results, batch_id)
+        return finalize_results([], first_round_results, batch_id, queue_name)
 
 
 # @shared_task
@@ -895,7 +895,7 @@ def process_spam_block_results(retry_results_list , first_round_results , batch_
 
 
 @shared_task
-def finalize_results(catch_all_results_list, first_round_results, batch_id):
+def finalize_results(catch_all_results_list, first_round_results, batch_id, queue_name):
     """Final step: Merges results and marks batch as complete."""
     
     print(f" FF {first_round_results}")
@@ -980,7 +980,7 @@ def finalize_results(catch_all_results_list, first_round_results, batch_id):
         )
     print(f"Final update triggered for batch: {batch_id}")
 
-    return {"batch_id": batch_id, "results": json_data }
+    return {"batch_id": batch_id, "results": json_data, "queue_name":queue_name }
 
     
 # @shared_task
@@ -1131,15 +1131,16 @@ def verify_emails_in_parallel(sender, proxy_host, proxy_port, proxy_user, proxy_
     redis_client.hset(f"batch:{batch_id}", mapping=batch_task_data)  # Store as a hash
     redis_client.expire(f"batch:{batch_id}", 86400)  # Set expiry time to 24 hours
     # start_batch_processor.delay(batch_id)
+    queue_name = verify_emails_in_parallel.request.delivery_info.get('routing_key', 'default')
 
     print(email_list)
     verification_tasks = group(
-        verify_email_via_smtp.s(sender, email, proxy_host, proxy_port, proxy_user, proxy_password, batch_id=batch_id, total_emails=total_emails, try_round=1)
+        verify_email_via_smtp.s(sender, email, proxy_host, proxy_port, proxy_user, proxy_password, batch_id=batch_id, total_emails=total_emails, try_round=1).set(queue=queue_name)
         for email in email_list
     )
 
-    chord(verification_tasks)(process_first_round_results.s(batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password))
-
+    workflow = chord(verification_tasks)(process_first_round_results.s(batch_id, sender, proxy_host, proxy_port, proxy_user, proxy_password, queue_name).set(queue=queue_name))
+    workflow.apply_async(queue=queue_name)
     return
 
 
